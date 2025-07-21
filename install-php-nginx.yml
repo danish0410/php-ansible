@@ -42,16 +42,8 @@
       register: nginx_status
       changed_when: false
 
-    - name: Show output of Nginx status
-      debug:
-        var: nginx_status.stdout_lines
-
     - name: Check port 80 usage
       shell: lsof -i :80
       register: port80_info
       changed_when: false
       ignore_errors: true
-
-    - name: Show who is using port 80
-      debug:
-        var: port80_info.stdout_lines
