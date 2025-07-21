@@ -1,5 +1,5 @@
 ---
-- name: Update system and install PHP & Nginx
+- name: Update system, install PHP & Nginx, and stop Apache
   hosts: all
   become: true
 
@@ -24,8 +24,34 @@
         name: nginx
         state: present
 
+    - name: Ensure Apache is stopped if running
+      service:
+        name: apache2
+        state: stopped
+        enabled: no
+      ignore_errors: yes
+
     - name: Ensure Nginx is started and enabled
       service:
         name: nginx
         state: started
         enabled: yes
+
+    - name: Show Nginx service status
+      shell: systemctl status nginx
+      register: nginx_status
+      changed_when: false
+
+    - name: Show output of Nginx status
+      debug:
+        var: nginx_status.stdout_lines
+
+    - name: Check port 80 usage
+      shell: lsof -i :80
+      register: port80_info
+      changed_when: false
+      ignore_errors: true
+
+    - name: Show who is using port 80
+      debug:
+        var: port80_info.stdout_lines
