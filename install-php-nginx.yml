@@ -1,7 +1,13 @@
 ---
-- name: Update system, install PHP & Nginx, and stop Apache
+- name: Setup Nginx + PHP + Git + Pull Repo and Display S3 Image
   hosts: all
   become: true
+
+  vars:
+    github_repo: "git@github.com:danish0410/php-nginx-helloworld.git"
+    github_branch: "feature"
+    app_dest: "/var/www/html/php-nginx-helloworld"
+    index_src: "/var/www/html/php-nginx-helloworld/php-app/index.php"
 
   tasks:
     - name: Update apt cache
@@ -24,12 +30,17 @@
         name: nginx
         state: present
 
-    - name: Ensure Apache is stopped if running
+    - name: Install Git
+      apt:
+        name: git
+        state: present
+
+    - name: Ensure Apache is stopped and disabled
       service:
         name: apache2
         state: stopped
         enabled: no
-      ignore_errors: yes
+      ignore_errors: true
 
     - name: Ensure Nginx is started and enabled
       service:
@@ -37,13 +48,24 @@
         state: started
         enabled: yes
 
-    - name: Show Nginx service status
-      shell: systemctl status nginx
-      register: nginx_status
-      changed_when: false
+    - name: Clone PHP Nginx App Repo (feature branch)
+      git:
+        repo: "{{ github_repo }}"
+        dest: "{{ app_dest }}"
+        version: "{{ github_branch }}"
+        key_file: /home/ubuntu/.ssh/id_rsa   # Make sure this key exists and is authorized
+        accept_hostkey: yes
 
-    - name: Check port 80 usage
-      shell: lsof -i :80
-      register: port80_info
-      changed_when: false
-      ignore_errors: true
+    - name: Copy index.php from php-app to Nginx root
+      copy:
+        src: "{{ index_src }}"
+        dest: /var/www/html/index.php
+        remote_src: yes
+        owner: www-data
+        group: www-data
+        mode: '0644'
+
+    - name: Restart Nginx
+      service:
+        name: nginx
+        state: restarted
