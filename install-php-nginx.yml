@@ -1,5 +1,5 @@
 ---
-- name: Setup Nginx + PHP + Git + Pull Repo and Display S3 Image
+- name: Install Jenkins on EBS volume and setup Nginx + PHP + Git App
   hosts: all
   become: true
 
@@ -8,6 +8,8 @@
     github_branch: "feature"
     app_dest: "/var/www/html/php-nginx-helloworld"
     index_src: "/var/www/html/php-nginx-helloworld/php-app/index.php"
+    jenkins_home: "/mnt/jenkins"
+    ebs_device: "/dev/xvdf"  # Adjust based on your attached EBS volume
 
   tasks:
     - name: Update apt cache
@@ -20,19 +22,9 @@
         upgrade: dist
         autoremove: yes
 
-    - name: Install PHP
+    - name: Install required packages
       apt:
-        name: php
-        state: present
-
-    - name: Install Nginx
-      apt:
-        name: nginx
-        state: present
-
-    - name: Install Git
-      apt:
-        name: git
+        name: ['php', 'nginx', 'git', 'openjdk-11-jdk', 'curl', 'gnupg2']
         state: present
 
     - name: Ensure Apache is stopped and disabled
@@ -41,6 +33,73 @@
         state: stopped
         enabled: no
       ignore_errors: true
+
+    - name: Mount EBS volume (if not formatted)
+      shell: |
+        if ! file -s {{ ebs_device }} | grep -q "filesystem"; then
+          mkfs -t ext4 {{ ebs_device }}
+        fi
+      args:
+        warn: false
+
+    - name: Create Jenkins home directory
+      file:
+        path: "{{ jenkins_home }}"
+        state: directory
+        owner: jenkins
+        group: jenkins
+        mode: '0755'
+
+    - name: Mount EBS volume to Jenkins directory
+      mount:
+        src: "{{ ebs_device }}"
+        path: "{{ jenkins_home }}"
+        fstype: ext4
+        opts: defaults
+        state: mounted
+
+    - name: Add Jenkins APT key
+      apt_key:
+        url: https://pkg.jenkins.io/debian-stable/jenkins.io.key
+        state: present
+
+    - name: Add Jenkins APT repository
+      apt_repository:
+        repo: deb https://pkg.jenkins.io/debian-stable binary/
+        state: present
+
+    - name: Install Jenkins
+      apt:
+        name: jenkins
+        state: present
+        update_cache: yes
+
+    - name: Stop Jenkins to configure custom home
+      service:
+        name: jenkins
+        state: stopped
+
+    - name: Update Jenkins config to use custom home
+      lineinfile:
+        path: /etc/default/jenkins
+        regexp: '^JENKINS_HOME='
+        line: "JENKINS_HOME={{ jenkins_home }}"
+        create: yes
+
+    - name: Copy existing Jenkins files if any
+      shell: |
+        if [ -d /var/lib/jenkins ] && [ -z "$(ls -A {{ jenkins_home }})" ]; then
+          cp -r /var/lib/jenkins/* {{ jenkins_home }}/
+          chown -R jenkins:jenkins {{ jenkins_home }}
+        fi
+      args:
+        warn: false
+
+    - name: Start Jenkins and enable at boot
+      service:
+        name: jenkins
+        state: started
+        enabled: yes
 
     - name: Ensure Nginx is started and enabled
       service:
@@ -53,7 +112,7 @@
         repo: "{{ github_repo }}"
         dest: "{{ app_dest }}"
         version: "{{ github_branch }}"
-        key_file: /home/ubuntu/.ssh/id_rsa   # Make sure this key exists and is authorized
+        key_file: /home/ubuntu/.ssh/id_rsa
         accept_hostkey: yes
 
     - name: Copy index.php from php-app to Nginx root
@@ -69,3 +128,11 @@
       service:
         name: nginx
         state: restarted
+		
+    - name: Write CAAS file with message "Hello RAJ!"
+      copy:
+        content: "Hello RAJ!"
+        dest: /home/ubuntu/CAAS.txt
+        owner: ubuntu
+        group: ubuntu
+        mode: '0644'
