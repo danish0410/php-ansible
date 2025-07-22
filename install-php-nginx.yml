@@ -128,7 +128,7 @@
       service:
         name: nginx
         state: restarted
-		
+
     - name: Write CAAS file with message "Hello RAJ!"
       copy:
         content: "Hello RAJ!"
