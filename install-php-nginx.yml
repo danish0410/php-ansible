@@ -1,5 +1,5 @@
 ---
-# First Play: Install Jenkins, Nginx, PHP, Git App
+# First Play: Install Jenkins on EBS volume and setup Nginx + PHP + Git App
 - name: Install Jenkins on EBS volume and setup Nginx + PHP + Git App
   hosts: all
   become: true
@@ -67,19 +67,28 @@
         opts: defaults
         state: mounted
 
-    - name: Add Jenkins GPG key
-      shell: |
-        curl -fsSL https://pkg.jenkins.io/debian/jenkins.io-2023.key | gpg --dearmor -o /usr/share/keyrings/jenkins-keyring.asc
-      args:
-        creates: /usr/share/keyrings/jenkins-keyring.asc
+    - name: Ensure Jenkins old repo entries are removed
+      file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - /etc/apt/sources.list.d/jenkins.list
+        - /etc/apt/sources.list.d/jenkins.list.save
 
-    - name: Add Jenkins APT repository
+    - name: Add Jenkins GPG key securely
+      get_url:
+        url: https://pkg.jenkins.io/debian/jenkins.io-2023.key
+        dest: /usr/share/keyrings/jenkins-keyring.asc
+        mode: '0644'
+
+    - name: Add Jenkins APT repository with signed key
       copy:
         dest: /etc/apt/sources.list.d/jenkins.list
         content: |
           deb [signed-by=/usr/share/keyrings/jenkins-keyring.asc] https://pkg.jenkins.io/debian binary/
+        mode: '0644'
 
-    - name: Update apt cache again after adding Jenkins repo
+    - name: Update apt cache after Jenkins repo setup
       apt:
         update_cache: yes
 
@@ -99,6 +108,7 @@
         regexp: '^JENKINS_HOME='
         line: "JENKINS_HOME={{ jenkins_home }}"
         create: yes
+        backup: yes
 
     - name: Copy existing Jenkins files if any
       shell: |
@@ -121,26 +131,26 @@
       systemd:
         daemon_reload: yes
 
-    - name: Start Jenkins and enable at boot
+    - name: Restart Jenkins to apply JENKINS_HOME change
       systemd:
         name: jenkins
-        state: started
+        state: restarted
         enabled: yes
 
-    - name: Wait for Jenkins port to be open
+    - name: Wait for Jenkins to create initialAdminPassword file
       wait_for:
-        port: "{{ jenkins_port }}"
-        delay: 10
-        timeout: 60
+        path: "{{ jenkins_home }}/secrets/initialAdminPassword"
+        state: present
+        timeout: 180
 
     - name: Get initial Jenkins admin password
       slurp:
         src: "{{ jenkins_home }}/secrets/initialAdminPassword"
-      register: jenkins_password
+      register: jenkins_admin_password_encoded
 
-    - name: Show initial admin password
+    - name: Show Jenkins initial admin password
       debug:
-        msg: "Jenkins admin password is {{ jenkins_password.content | b64decode }}"
+        msg: "Jenkins admin password is {{ jenkins_admin_password_encoded.content | b64decode }}"
 
     - name: Ensure Nginx is started and enabled
       service:
@@ -206,13 +216,13 @@
 
   pre_tasks:
     - name: Ensure ~/.kube/config exists on remote (if control plane)
-      ansible.builtin.shell: |
+      shell: |
         mkdir -p /home/ubuntu/.kube
         cp -i /etc/kubernetes/admin.conf /home/ubuntu/.kube/config
         chown ubuntu:ubuntu /home/ubuntu/.kube/config
       args:
         creates: /home/ubuntu/.kube/config
-      ignore_errors: true  # Don't fail if this node isn't a control plane
+      ignore_errors: true
 
     - name: Check if kubeconfig exists on Ansible controller
       stat:
