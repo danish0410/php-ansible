@@ -1,0 +1,49 @@
+controller:
+  image:
+    tag: "lts-jdk17"
+  installPlugins:
+    - kubernetes:latest
+    - workflow-job:latest
+    - workflow-aggregator:latest
+    - git:latest
+    - configuration-as-code:latest
+    - docker-workflow:latest
+    - pipeline-stage-view:latest
+
+  resources:
+    requests:
+      cpu: "500m"
+      memory: "1Gi"
+    limits:
+      cpu: "1"
+      memory: "2Gi"
+
+  serviceType: LoadBalancer
+  servicePort: 8080
+
+  persistence:
+    enabled: true
+    existingClaim: jenkins-ebs-pvc
+    storageClass: ""
+    size: 20Gi
+
+  jenkinsHome: /var/jenkins_home
+
+  agent:
+    enabled: true
+    podTemplates:
+      maven:
+        name: maven
+        label: maven
+        containers:
+          - name: maven
+            image: maven:3.8.4-openjdk-17
+            command:
+              - cat
+            tty: true
+
+rbac:
+  create: true
+
+serviceAccount:
+  create: true

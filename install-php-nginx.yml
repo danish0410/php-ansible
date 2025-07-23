@@ -1,4 +1,5 @@
 ---
+# First Play: Install Jenkins, Nginx, PHP, Git App
 - name: Install Jenkins on EBS volume and setup Nginx + PHP + Git App
   hosts: all
   become: true
@@ -9,7 +10,8 @@
     app_dest: "/var/www/html/php-nginx-helloworld"
     index_src: "/var/www/html/php-nginx-helloworld/php-app/index.php"
     jenkins_home: "/mnt/jenkins"
-    ebs_device: "/dev/xvdf"  # Adjust based on your attached EBS volume
+    ebs_device: "/dev/xvdf"
+    jenkins_port: 8080
 
   tasks:
     - name: Update apt cache
@@ -24,7 +26,15 @@
 
     - name: Install required packages
       apt:
-        name: ['php', 'nginx', 'git', 'openjdk-11-jdk', 'curl', 'gnupg2']
+        name:
+          - php
+          - nginx
+          - git
+          - openjdk-17-jdk
+          - curl
+          - gnupg2
+          - file
+          - wget
         state: present
 
     - name: Ensure Apache is stopped and disabled
@@ -34,21 +44,20 @@
         enabled: no
       ignore_errors: true
 
-    - name: Mount EBS volume (if not formatted)
-      shell: |
-        if ! file -s {{ ebs_device }} | grep -q "filesystem"; then
-          mkfs -t ext4 {{ ebs_device }}
-        fi
-      args:
-        warn: false
-
-    - name: Create Jenkins home directory
+    - name: Create Jenkins home directory if not exists
       file:
         path: "{{ jenkins_home }}"
         state: directory
-        owner: jenkins
-        group: jenkins
         mode: '0755'
+
+    - name: Format EBS volume if not already formatted and not mounted
+      shell: |
+        if ! file -s {{ ebs_device }} | grep -q "filesystem"; then
+          mountpoint -q {{ jenkins_home }} || mkfs -t ext4 {{ ebs_device }}
+        fi
+      args:
+        executable: /bin/bash
+        warn: false
 
     - name: Mount EBS volume to Jenkins directory
       mount:
@@ -58,21 +67,26 @@
         opts: defaults
         state: mounted
 
-    - name: Add Jenkins APT key
-      apt_key:
-        url: https://pkg.jenkins.io/debian-stable/jenkins.io.key
-        state: present
+    - name: Add Jenkins GPG key
+      shell: |
+        curl -fsSL https://pkg.jenkins.io/debian/jenkins.io-2023.key | gpg --dearmor -o /usr/share/keyrings/jenkins-keyring.asc
+      args:
+        creates: /usr/share/keyrings/jenkins-keyring.asc
 
     - name: Add Jenkins APT repository
-      apt_repository:
-        repo: deb https://pkg.jenkins.io/debian-stable binary/
-        state: present
+      copy:
+        dest: /etc/apt/sources.list.d/jenkins.list
+        content: |
+          deb [signed-by=/usr/share/keyrings/jenkins-keyring.asc] https://pkg.jenkins.io/debian binary/
+
+    - name: Update apt cache again after adding Jenkins repo
+      apt:
+        update_cache: yes
 
     - name: Install Jenkins
       apt:
         name: jenkins
         state: present
-        update_cache: yes
 
     - name: Stop Jenkins to configure custom home
       service:
@@ -95,11 +109,38 @@
       args:
         warn: false
 
+    - name: Ensure Jenkins home directory has correct ownership
+      file:
+        path: "{{ jenkins_home }}"
+        state: directory
+        owner: jenkins
+        group: jenkins
+        recurse: yes
+
+    - name: Reload systemd daemon
+      systemd:
+        daemon_reload: yes
+
     - name: Start Jenkins and enable at boot
-      service:
+      systemd:
         name: jenkins
         state: started
         enabled: yes
+
+    - name: Wait for Jenkins port to be open
+      wait_for:
+        port: "{{ jenkins_port }}"
+        delay: 10
+        timeout: 60
+
+    - name: Get initial Jenkins admin password
+      slurp:
+        src: "{{ jenkins_home }}/secrets/initialAdminPassword"
+      register: jenkins_password
+
+    - name: Show initial admin password
+      debug:
+        msg: "Jenkins admin password is {{ jenkins_password.content | b64decode }}"
 
     - name: Ensure Nginx is started and enabled
       service:
@@ -132,7 +173,122 @@
     - name: Write CAAS file with message "Hello RAJ!"
       copy:
         content: "Hello RAJ!"
-        dest: /home/ubuntu/CAAS.txt
+        dest: /var/www/html/caas.txt
+
+    - name: Install Helm
+      shell: |
+        curl https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
+      args:
+        creates: /usr/local/bin/helm
+
+    - name: Add Jenkins Helm repo
+      shell: helm repo add jenkins https://charts.jenkins.io && helm repo update
+
+    - name: Ensure pip is installed
+      apt:
+        name: python3-pip
+        state: present
+
+    - name: Install Kubernetes Python client
+      pip:
+        name: kubernetes
+        executable: pip3
+
+# Second Play: Upload kubeconfig and create Jenkins namespace
+- name: Upload kubeconfig and create Jenkins namespace
+  hosts: php-node
+  become: true
+
+  vars:
+    kubeconfig_local_path: "/home/ubuntu/.kube/config"
+    kubeconfig_remote_path: "/home/ubuntu/.kube/config"
+    kubeconfig_path: "/home/ubuntu/.kube/config"
+
+  pre_tasks:
+    - name: Ensure ~/.kube/config exists on remote (if control plane)
+      ansible.builtin.shell: |
+        mkdir -p /home/ubuntu/.kube
+        cp -i /etc/kubernetes/admin.conf /home/ubuntu/.kube/config
+        chown ubuntu:ubuntu /home/ubuntu/.kube/config
+      args:
+        creates: /home/ubuntu/.kube/config
+      ignore_errors: true  # Don't fail if this node isn't a control plane
+
+    - name: Check if kubeconfig exists on Ansible controller
+      stat:
+        path: "{{ kubeconfig_local_path }}"
+      register: kubeconfig_local_stat
+      delegate_to: localhost
+
+    - name: Create local .kube directory if kubeconfig is missing
+      file:
+        path: "{{ kubeconfig_local_path | dirname }}"
+        state: directory
+        mode: '0700'
+      when: not kubeconfig_local_stat.stat.exists
+      delegate_to: localhost
+
+    - name: Fetch kubeconfig from remote if missing locally
+      fetch:
+        src: "{{ kubeconfig_remote_path }}"
+        dest: "{{ kubeconfig_local_path }}"
+        flat: yes
+      when: not kubeconfig_local_stat.stat.exists
+      delegate_to: localhost
+      ignore_errors: true
+
+    - name: Set permissions for local kubeconfig
+      file:
+        path: "{{ kubeconfig_local_path }}"
+        mode: '0600'
+      when: not kubeconfig_local_stat.stat.exists
+      delegate_to: localhost
+      ignore_errors: true
+
+  tasks:
+    - name: Ensure .kube directory exists on remote
+      file:
+        path: "{{ kubeconfig_remote_path | dirname }}"
+        state: directory
         owner: ubuntu
         group: ubuntu
-        mode: '0644'
+        mode: '0755'
+
+    - name: Copy kubeconfig to remote
+      copy:
+        src: "{{ kubeconfig_local_path }}"
+        dest: "{{ kubeconfig_remote_path }}"
+        owner: ubuntu
+        group: ubuntu
+        mode: '0600'
+      delegate_to: localhost
+      when: kubeconfig_local_stat.stat.exists
+      ignore_errors: true
+
+    - name: Create jenkins namespace
+      kubernetes.core.k8s:
+        api_version: v1
+        kind: Namespace
+        name: jenkins
+        kubeconfig: "{{ kubeconfig_remote_path }}"
+      when: kubeconfig_local_stat.stat.exists and lookup('file', kubeconfig_local_path) | length > 0
+
+    - name: Create PVC for Jenkins EBS
+      kubernetes.core.k8s:
+        state: present
+        definition: "{{ lookup('file', playbook_dir + '/jenkins-pvc.yaml') }}"
+        kubeconfig: "{{ kubeconfig_path }}"
+      delegate_to: localhost
+
+    - name: Copy Helm values file
+      copy:
+        src: jenkins-values.yaml
+        dest: /tmp/jenkins-values.yaml
+
+    - name: Apply Jenkins Helm Chart with values.yaml
+      shell: |
+        helm upgrade --install jenkins jenkins/jenkins \
+          --namespace jenkins \
+          --values /tmp/jenkins-values.yaml
+      args:
+        executable: /bin/bash
